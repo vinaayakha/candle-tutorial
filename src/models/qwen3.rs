@@ -114,8 +114,8 @@ impl Qwen3RotaryEmbedding {
 
     fn apply(&self, q: &Tensor, k: &Tensor, offset: usize) -> Result<(Tensor, Tensor)> {
         let seq_len = q.dim(2)?;
-        let cos = self.cos.i(offset..offset + seq_len)?;
-        let sin = self.sin.i(offset..offset + seq_len)?;
+        let cos = self.cos.i(offset..offset + seq_len)?.to_dtype(q.dtype())?;
+        let sin = self.sin.i(offset..offset + seq_len)?.to_dtype(q.dtype())?;
         let q_rot = candle_nn::rotary_emb::rope(q, &cos, &sin)?;
         let k_rot = candle_nn::rotary_emb::rope(k, &cos, &sin)?;
         Ok((q_rot, k_rot))
@@ -528,10 +528,11 @@ impl Qwen3Model {
             emax
         );
 
-        // Causal mask
+        // Causal mask — cast to match embedding dtype (BF16 on GPU)
         let mask = if seq_len > 1 {
-            let m = Self::build_causal_mask(seq_len, offset, &self.device)?;
-            println!("[Model] Causal mask: {:?}", m.dims());
+            let m = Self::build_causal_mask(seq_len, offset, &self.device)?
+                .to_dtype(xs.dtype())?;
+            println!("[Model] Causal mask: {:?}, dtype: {:?}", m.dims(), m.dtype());
             Some(m)
         } else {
             println!("[Model] No causal mask (single token decode)");

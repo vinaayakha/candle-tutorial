@@ -11,7 +11,29 @@ use tokenizers::Tokenizer;
 
 use candle_tutorial::chat::{apply_chat_template, ChatMessage};
 use candle_tutorial::generate::{generate, SamplingParams};
-use candle_tutorial::models::qwen3::{Qwen3Config, Qwen3ForCausalLM, FLOATING_DTYPE};
+use candle_tutorial::models::qwen3::{Qwen3Config, Qwen3ForCausalLM};
+
+// ---------------------------------------------------------------------------
+// Device selection: CUDA > Metal > CPU
+// ---------------------------------------------------------------------------
+
+fn select_device() -> Result<Device> {
+    // Try CUDA first (NVIDIA GPU)
+    if let Ok(device) = Device::new_cuda(0) {
+        println!("[Device] Using CUDA (NVIDIA GPU)");
+        return Ok(device);
+    }
+
+    // Try Metal (Apple Silicon GPU)
+    if let Ok(device) = Device::new_metal(0) {
+        println!("[Device] Using Metal (Apple Silicon GPU)");
+        return Ok(device);
+    }
+
+    // Fallback to CPU
+    println!("[Device] No GPU available, falling back to CPU");
+    Ok(Device::Cpu)
+}
 
 // ---------------------------------------------------------------------------
 // App state
@@ -83,8 +105,13 @@ struct Usage {
 // ---------------------------------------------------------------------------
 
 fn load_model_and_tokenizer() -> Result<(Qwen3ForCausalLM, Tokenizer, Qwen3Config)> {
-    let device = Device::Cpu;
-    let model_id = "Qwen/Qwen3-0.6B".to_string();
+    let device = select_device()?;
+
+    // Use BF16 on GPU (Metal/CUDA support it natively), F32 on CPU
+    let dtype = device.bf16_default_to_f32();
+    println!("[Device] dtype: {:?}", dtype);
+
+    let model_id = "DavidAU/Qwen3-0.6B-heretic-abliterated-uncensored".to_string(); //DavidAU/Qwen3-0.6B-heretic-abliterated-uncensored | Qwen/Qwen3-0.6B
     let repo = Repo::with_revision(model_id, RepoType::Model, "main".to_string());
 
     let api = Api::new()?;
@@ -103,11 +130,11 @@ fn load_model_and_tokenizer() -> Result<(Qwen3ForCausalLM, Tokenizer, Qwen3Confi
     let tokenizer = Tokenizer::from_file(tokenizer_path).map_err(E::msg)?;
 
     let vb = unsafe {
-        VarBuilder::from_mmaped_safetensors(&[weights_path], FLOATING_DTYPE, &device)?
+        VarBuilder::from_mmaped_safetensors(&[weights_path], dtype, &device)?
     };
     let model = Qwen3ForCausalLM::load(vb, &config)?;
 
-    println!("Model loaded successfully!");
+    println!("Model loaded on {:?} successfully!", device);
     Ok((model, tokenizer, config))
 }
 
