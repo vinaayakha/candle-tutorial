@@ -25,7 +25,8 @@ pub fn binary_cross_entropy_with_logit(inp: &Tensor, target: &Tensor) -> Result<
 pub enum HiddenAct {
     Gelu,
     Relu,
-    Tanh
+    Silu,
+    Tanh,
 }
 
 pub struct HiddenActLayer {
@@ -42,7 +43,8 @@ impl HiddenActLayer {
             // https://github.com/huggingface/transformers/blob/cd4584e3c809bb9e1392ccd3fe38b40daba5519a/src/transformers/activations.py#L213
             HiddenAct::Gelu => xs.gelu_erf(),
             HiddenAct::Relu => xs.relu(),
-            HiddenAct::Tanh => xs.tanh()
+            HiddenAct::Silu => xs.silu(),
+            HiddenAct::Tanh => xs.tanh(),
         }
     }
 }
