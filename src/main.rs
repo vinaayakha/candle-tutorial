@@ -119,7 +119,16 @@ async fn chat_completions(
     State(state): State<Arc<AppState>>,
     Json(req): Json<ChatCompletionRequest>,
 ) -> Json<ChatCompletionResponse> {
+    println!("\n============================================================");
+    println!("[Request] POST /v1/chat/completions");
+    println!("[Request] messages={}, max_tokens={}, temperature={}, top_p={}",
+        req.messages.len(), req.max_tokens, req.temperature, req.top_p);
+    for (i, msg) in req.messages.iter().enumerate() {
+        println!("[Request]   msg[{}]: role={}, content_len={}", i, msg.role, msg.content.len());
+    }
+
     let prompt = apply_chat_template(&req.messages);
+    println!("[Chat] Template applied, prompt_len={} chars", prompt.len());
 
     let encoding = state
         .tokenizer
@@ -127,6 +136,7 @@ async fn chat_completions(
         .expect("tokenization failed");
     let input_ids: Vec<u32> = encoding.get_ids().to_vec();
     let prompt_len = input_ids.len();
+    println!("[Tokenizer] Encoded {} tokens from prompt", prompt_len);
 
     let params = SamplingParams {
         temperature: req.temperature,
@@ -163,6 +173,13 @@ async fn chat_completions(
     } else {
         "stop"
     };
+
+    println!("[Response] finish_reason={}, prompt_tokens={}, completion_tokens={}, total={}",
+        finish_reason, prompt_len, completion_len, prompt_len + completion_len);
+    println!("[Response] content ({} chars): {:?}",
+        content.len(),
+        if content.len() > 200 { format!("{}...", &content[..200]) } else { content.clone() }
+    );
 
     Json(ChatCompletionResponse {
         id: "chatcmpl-candle".to_string(),

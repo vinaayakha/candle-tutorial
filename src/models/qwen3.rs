@@ -4,6 +4,22 @@ use serde::Deserialize;
 
 pub const FLOATING_DTYPE: DType = DType::F32;
 
+/// Helper: compute summary stats (mean, min, max) from a tensor for logging.
+/// Returns (mean, min, max). Falls back to (0,0,0) on error.
+fn tensor_stats(t: &Tensor) -> (f32, f32, f32) {
+    let flat = t.flatten_all().and_then(|f| f.to_dtype(DType::F32));
+    let Ok(flat) = flat else { return (0.0, 0.0, 0.0) };
+    let vals: Vec<f32> = flat.to_vec1().unwrap_or_default();
+    if vals.is_empty() {
+        return (0.0, 0.0, 0.0);
+    }
+    let sum: f32 = vals.iter().sum();
+    let mean = sum / vals.len() as f32;
+    let min = vals.iter().cloned().fold(f32::INFINITY, f32::min);
+    let max = vals.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+    (mean, min, max)
+}
+
 // ---------------------------------------------------------------------------
 // Config
 // ---------------------------------------------------------------------------
@@ -85,11 +101,10 @@ impl Qwen3RotaryEmbedding {
         let inv_freq: Vec<f32> = (0..half)
             .map(|i| 1.0 / (theta as f32).powf(i as f32 * 2.0 / head_dim as f32))
             .collect();
-        let inv_freq = Tensor::new(inv_freq.as_slice(), device)?; // [half]
+        let inv_freq = Tensor::new(inv_freq.as_slice(), device)?;
         let positions: Vec<f32> = (0..max_seq_len).map(|p| p as f32).collect();
-        let positions = Tensor::new(positions.as_slice(), device)?; // [max_seq_len]
+        let positions = Tensor::new(positions.as_slice(), device)?;
 
-        // [max_seq_len, half]
         let freqs = positions.unsqueeze(1)?.broadcast_mul(&inv_freq.unsqueeze(0)?)?;
 
         let cos = freqs.cos()?;
@@ -97,12 +112,9 @@ impl Qwen3RotaryEmbedding {
         Ok(Self { cos, sin })
     }
 
-    /// Apply RoPE to query/key tensors.
-    /// Input shape: [batch, num_heads, seq_len, head_dim]
-    /// offset: position offset for KV-cache continuation
     fn apply(&self, q: &Tensor, k: &Tensor, offset: usize) -> Result<(Tensor, Tensor)> {
         let seq_len = q.dim(2)?;
-        let cos = self.cos.i(offset..offset + seq_len)?; // [seq_len, half]
+        let cos = self.cos.i(offset..offset + seq_len)?;
         let sin = self.sin.i(offset..offset + seq_len)?;
         let q_rot = candle_nn::rotary_emb::rope(q, &cos, &sin)?;
         let k_rot = candle_nn::rotary_emb::rope(k, &cos, &sin)?;
@@ -111,17 +123,18 @@ impl Qwen3RotaryEmbedding {
 }
 
 // ---------------------------------------------------------------------------
-// MLP: gate_proj + up_proj → SiLU-gated → down_proj
+// MLP: gate_proj + up_proj -> SiLU-gated -> down_proj
 // ---------------------------------------------------------------------------
 
 struct Qwen3MLP {
     gate_proj: candle_nn::Linear,
     up_proj: candle_nn::Linear,
     down_proj: candle_nn::Linear,
+    layer_idx: usize,
 }
 
 impl Qwen3MLP {
-    fn load(vb: VarBuilder, config: &Qwen3Config) -> Result<Self> {
+    fn load(vb: VarBuilder, config: &Qwen3Config, layer_idx: usize) -> Result<Self> {
         let h = config.hidden_size;
         let i = config.intermediate_size;
         let gate_proj = candle_nn::linear_no_bias(h, i, vb.pp("gate_proj"))?;
@@ -131,13 +144,38 @@ impl Qwen3MLP {
             gate_proj,
             up_proj,
             down_proj,
+            layer_idx,
         })
     }
 
     fn forward(&self, xs: &Tensor) -> Result<Tensor> {
-        let gate = self.gate_proj.forward(xs)?.silu()?;
+        println!(
+            "    [Layer {:>2}] MLP input: {:?}",
+            self.layer_idx,
+            xs.dims()
+        );
+
+        let gate = self.gate_proj.forward(xs)?;
+        let gate_act = gate.silu()?;
         let up = self.up_proj.forward(xs)?;
-        self.down_proj.forward(&(gate * up)?)
+        let gated = (&gate_act * &up)?;
+        let out = self.down_proj.forward(&gated)?;
+
+        let (g_mean, g_min, g_max) = tensor_stats(&gate_act);
+        let (o_mean, o_min, o_max) = tensor_stats(&out);
+        println!(
+            "    [Layer {:>2}] MLP gate_silu stats: mean={:.4}, min={:.4}, max={:.4}",
+            self.layer_idx, g_mean, g_min, g_max
+        );
+        println!(
+            "    [Layer {:>2}] MLP output: {:?}, stats: mean={:.4}, min={:.4}, max={:.4}",
+            self.layer_idx,
+            out.dims(),
+            o_mean,
+            o_min,
+            o_max
+        );
+        Ok(out)
     }
 }
 
@@ -170,10 +208,11 @@ struct Qwen3Attention {
     num_kv_heads: usize,
     head_dim: usize,
     kv_cache: Option<(Tensor, Tensor)>,
+    layer_idx: usize,
 }
 
 impl Qwen3Attention {
-    fn load(vb: VarBuilder, config: &Qwen3Config) -> Result<Self> {
+    fn load(vb: VarBuilder, config: &Qwen3Config, layer_idx: usize) -> Result<Self> {
         let h = config.hidden_size;
         let hd = config.head_dim;
         let nh = config.num_attention_heads;
@@ -198,6 +237,7 @@ impl Qwen3Attention {
             num_kv_heads: nkv,
             head_dim: hd,
             kv_cache: None,
+            layer_idx,
         })
     }
 
@@ -208,9 +248,13 @@ impl Qwen3Attention {
         rope: &Qwen3RotaryEmbedding,
         offset: usize,
     ) -> Result<Tensor> {
-        let (b, seq_len, _) = xs.dims3()?;
+        let (b, seq_len, hidden) = xs.dims3()?;
+        println!(
+            "    [Layer {:>2}] Attention input: [{}, {}, {}], offset={}",
+            self.layer_idx, b, seq_len, hidden, offset
+        );
 
-        // Project
+        // Project Q/K/V
         let q = self.q_proj.forward(xs)?;
         let k = self.k_proj.forward(xs)?;
         let v = self.v_proj.forward(xs)?;
@@ -226,9 +270,23 @@ impl Qwen3Attention {
             .reshape((b, seq_len, self.num_kv_heads, self.head_dim))?
             .transpose(1, 2)?;
 
-        // QK-norm (per-head RmsNorm applied on the last dimension)
+        println!(
+            "    [Layer {:>2}] Q: {:?}, K: {:?}, V: {:?}",
+            self.layer_idx,
+            q.dims(),
+            k.dims(),
+            v.dims()
+        );
+
+        // QK-norm
         let q = self.apply_head_norm(&self.q_norm, &q)?;
         let k = self.apply_head_norm(&self.k_norm, &k)?;
+
+        let (qn_mean, qn_min, qn_max) = tensor_stats(&q);
+        println!(
+            "    [Layer {:>2}] After QK-norm: Q stats: mean={:.4}, min={:.4}, max={:.4}",
+            self.layer_idx, qn_mean, qn_min, qn_max
+        );
 
         // RoPE
         let (q, k) = rope.apply(&q, &k, offset)?;
@@ -243,6 +301,12 @@ impl Qwen3Attention {
             }
         };
         self.kv_cache = Some((k.clone(), v.clone()));
+
+        let kv_seq_len = k.dim(2)?;
+        println!(
+            "    [Layer {:>2}] KV-cache total seq_len: {}",
+            self.layer_idx, kv_seq_len
+        );
 
         // GQA expansion
         let n_rep = self.num_heads / self.num_kv_heads;
@@ -259,6 +323,33 @@ impl Qwen3Attention {
         };
 
         let attn_weights = candle_nn::ops::softmax_last_dim(&attn_weights)?;
+
+        // Log per-head attention stats (mean attention weight per head)
+        {
+            let (_, n_heads, q_len, kv_len) = attn_weights.dims4()?;
+            println!(
+                "    [Layer {:>2}] Attention weights: [{}, {}, {}, {}] (heads x q_len x kv_len)",
+                self.layer_idx, b, n_heads, q_len, kv_len
+            );
+            // Show stats for first few heads
+            let max_heads_to_show = n_heads.min(4);
+            for h in 0..max_heads_to_show {
+                let head_w = attn_weights.i((0, h))?; // [q_len, kv_len]
+                let (hm, hmin, hmax) = tensor_stats(&head_w);
+                println!(
+                    "    [Layer {:>2}]   Head {:>2}: mean={:.4}, min={:.4}, max={:.4}",
+                    self.layer_idx, h, hm, hmin, hmax
+                );
+            }
+            if n_heads > max_heads_to_show {
+                println!(
+                    "    [Layer {:>2}]   ... ({} more heads)",
+                    self.layer_idx,
+                    n_heads - max_heads_to_show
+                );
+            }
+        }
+
         let attn_output = attn_weights.matmul(&v)?;
 
         // Reshape back to [b, seq, hidden]
@@ -267,11 +358,21 @@ impl Qwen3Attention {
             .contiguous()?
             .reshape((b, seq_len, self.num_heads * self.head_dim))?;
 
-        self.o_proj.forward(&attn_output)
+        let out = self.o_proj.forward(&attn_output)?;
+        let (om, omin, omax) = tensor_stats(&out);
+        println!(
+            "    [Layer {:>2}] Attention output: {:?}, stats: mean={:.4}, min={:.4}, max={:.4}",
+            self.layer_idx,
+            out.dims(),
+            om,
+            omin,
+            omax
+        );
+
+        Ok(out)
     }
 
     fn apply_head_norm(&self, norm: &RmsNorm, xs: &Tensor) -> Result<Tensor> {
-        // xs: [b, heads, seq, head_dim] — apply RmsNorm on last dim per-head
         let (b, heads, seq, hd) = xs.dims4()?;
         let xs = xs.reshape((b * heads * seq, hd))?;
         let xs = norm.forward(&xs.unsqueeze(0)?)?;
@@ -292,12 +393,13 @@ struct Qwen3DecoderLayer {
     mlp: Qwen3MLP,
     input_layernorm: RmsNorm,
     post_attention_layernorm: RmsNorm,
+    layer_idx: usize,
 }
 
 impl Qwen3DecoderLayer {
-    fn load(vb: VarBuilder, config: &Qwen3Config) -> Result<Self> {
-        let self_attn = Qwen3Attention::load(vb.pp("self_attn"), config)?;
-        let mlp = Qwen3MLP::load(vb.pp("mlp"), config)?;
+    fn load(vb: VarBuilder, config: &Qwen3Config, layer_idx: usize) -> Result<Self> {
+        let self_attn = Qwen3Attention::load(vb.pp("self_attn"), config, layer_idx)?;
+        let mlp = Qwen3MLP::load(vb.pp("mlp"), config, layer_idx)?;
         let input_layernorm =
             RmsNorm::load(config.hidden_size, config.rms_norm_eps, vb.pp("input_layernorm"))?;
         let post_attention_layernorm = RmsNorm::load(
@@ -310,6 +412,7 @@ impl Qwen3DecoderLayer {
             mlp,
             input_layernorm,
             post_attention_layernorm,
+            layer_idx,
         })
     }
 
@@ -320,15 +423,50 @@ impl Qwen3DecoderLayer {
         rope: &Qwen3RotaryEmbedding,
         offset: usize,
     ) -> Result<Tensor> {
+        let (in_mean, in_min, in_max) = tensor_stats(xs);
+        println!(
+            "  [Layer {:>2}] === ENTER === input: {:?}, stats: mean={:.4}, min={:.4}, max={:.4}",
+            self.layer_idx,
+            xs.dims(),
+            in_mean,
+            in_min,
+            in_max
+        );
+
         let residual = xs.clone();
         let xs = self.input_layernorm.forward(xs)?;
+
+        let (ln_mean, ln_min, ln_max) = tensor_stats(&xs);
+        println!(
+            "    [Layer {:>2}] After input_layernorm: stats: mean={:.4}, min={:.4}, max={:.4}",
+            self.layer_idx, ln_mean, ln_min, ln_max
+        );
+
         let xs = self.self_attn.forward(&xs, mask, rope, offset)?;
         let xs = (residual + xs)?;
+
+        let (r1_mean, _, _) = tensor_stats(&xs);
+        println!(
+            "    [Layer {:>2}] After attn + residual: mean={:.4}",
+            self.layer_idx, r1_mean
+        );
 
         let residual = xs.clone();
         let xs = self.post_attention_layernorm.forward(&xs)?;
         let xs = self.mlp.forward(&xs)?;
-        residual + xs
+        let out = (residual + xs)?;
+
+        let (out_mean, out_min, out_max) = tensor_stats(&out);
+        println!(
+            "  [Layer {:>2}] === EXIT ===  output: {:?}, stats: mean={:.4}, min={:.4}, max={:.4}",
+            self.layer_idx,
+            out.dims(),
+            out_mean,
+            out_min,
+            out_max
+        );
+
+        Ok(out)
     }
 }
 
@@ -354,6 +492,7 @@ impl Qwen3Model {
             layers.push(Qwen3DecoderLayer::load(
                 vb.pp(format!("layers.{i}")),
                 config,
+                i,
             )?);
         }
         let norm = RmsNorm::load(config.hidden_size, config.rms_norm_eps, vb.pp("norm"))?;
@@ -373,26 +512,53 @@ impl Qwen3Model {
     }
 
     fn forward(&mut self, input_ids: &Tensor, offset: usize) -> Result<Tensor> {
-        let (_, seq_len) = input_ids.dims2()?;
+        let (batch, seq_len) = input_ids.dims2()?;
+        println!(
+            "[Model] Forward: input_ids=[{}, {}], offset={}",
+            batch, seq_len, offset
+        );
+
         let mut xs = self.embed_tokens.forward(input_ids)?;
+        let (em, emin, emax) = tensor_stats(&xs);
+        println!(
+            "[Model] Embedding output: {:?}, stats: mean={:.4}, min={:.4}, max={:.4}",
+            xs.dims(),
+            em,
+            emin,
+            emax
+        );
 
         // Causal mask
         let mask = if seq_len > 1 {
-            Some(Self::build_causal_mask(seq_len, offset, &self.device)?)
+            let m = Self::build_causal_mask(seq_len, offset, &self.device)?;
+            println!("[Model] Causal mask: {:?}", m.dims());
+            Some(m)
         } else {
+            println!("[Model] No causal mask (single token decode)");
             None
         };
 
-        for layer in self.layers.iter_mut() {
+        let num_layers = self.layers.len();
+        for (i, layer) in self.layers.iter_mut().enumerate() {
+            println!("--- Layer {}/{} ---", i, num_layers - 1);
             xs = layer.forward(&xs, mask.as_ref(), &self.rotary_emb, offset)?;
         }
 
-        self.norm.forward(&xs)
+        let xs = self.norm.forward(&xs)?;
+        let (nm, nmin, nmax) = tensor_stats(&xs);
+        println!(
+            "[Model] Final RmsNorm output: {:?}, stats: mean={:.4}, min={:.4}, max={:.4}",
+            xs.dims(),
+            nm,
+            nmin,
+            nmax
+        );
+
+        Ok(xs)
     }
 
     fn build_causal_mask(seq_len: usize, offset: usize, device: &Device) -> Result<Tensor> {
         let total_len = offset + seq_len;
-        // Create a [seq_len, total_len] mask where future positions are -inf
         let mask: Vec<f32> = (0..seq_len)
             .flat_map(|i| {
                 (0..total_len).map(move |j| {
@@ -429,7 +595,6 @@ impl Qwen3ForCausalLM {
         let model = Qwen3Model::load(vb.pp("model"), config)?;
 
         let lm_head = if config.tie_word_embeddings {
-            // Weight tying: reuse embed_tokens weight as lm_head
             let embed_weight = model.embed_tokens.embeddings().clone();
             candle_nn::Linear::new(embed_weight, None)
         } else {
@@ -439,10 +604,20 @@ impl Qwen3ForCausalLM {
         Ok(Self { model, lm_head })
     }
 
-    /// Returns logits for the full sequence: [batch, seq_len, vocab_size]
     pub fn forward(&mut self, input_ids: &Tensor, offset: usize) -> Result<Tensor> {
         let hidden = self.model.forward(input_ids, offset)?;
-        self.lm_head.forward(&hidden)
+        let logits = self.lm_head.forward(&hidden)?;
+
+        let (lm, lmin, lmax) = tensor_stats(&logits);
+        println!(
+            "[CausalLM] lm_head output (logits): {:?}, stats: mean={:.4}, min={:.4}, max={:.4}",
+            logits.dims(),
+            lm,
+            lmin,
+            lmax
+        );
+
+        Ok(logits)
     }
 
     pub fn reset_kv_cache(&mut self) {

@@ -27,11 +27,15 @@ fn sample_token(logits: &Tensor, params: &SamplingParams) -> Result<u32> {
 
     if params.temperature <= 0.0 {
         // Greedy
-        let (idx, _) = logits_vec
+        let (idx, val) = logits_vec
             .iter()
             .enumerate()
             .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
             .unwrap();
+        println!(
+            "[Sampling] Greedy: token_id={}, logit={:.4}",
+            idx, val
+        );
         return Ok(idx as u32);
     }
 
@@ -60,6 +64,20 @@ fn sample_token(logits: &Tensor, params: &SamplingParams) -> Result<u32> {
     }
     let filtered = &probs[..cutoff_idx];
 
+    // Log top-5 candidates
+    let show_n = filtered.len().min(5);
+    let top_candidates: Vec<String> = filtered[..show_n]
+        .iter()
+        .map(|(id, p)| format!("{}({:.4})", id, p))
+        .collect();
+    println!(
+        "[Sampling] temp={:.2}, top_p={:.2}, nucleus_size={}, top-5: [{}]",
+        params.temperature,
+        params.top_p,
+        filtered.len(),
+        top_candidates.join(", ")
+    );
+
     let weights: Vec<f64> = filtered.iter().map(|&(_, p)| p).collect();
     let indices: Vec<usize> = filtered.iter().map(|&(i, _)| i).collect();
 
@@ -67,12 +85,19 @@ fn sample_token(logits: &Tensor, params: &SamplingParams) -> Result<u32> {
     let mut rng = rand::thread_rng();
     let sampled = dist.sample(&mut rng);
 
-    Ok(indices[sampled] as u32)
+    let chosen_id = indices[sampled] as u32;
+    let chosen_prob = weights[sampled];
+    println!(
+        "[Sampling] Sampled: token_id={}, prob={:.4}",
+        chosen_id, chosen_prob
+    );
+
+    Ok(chosen_id)
 }
 
 /// Generate tokens autoregressively.
 ///
-/// `input_ids`: [1, seq_len] — the prompt tokens
+/// `input_ids`: [1, seq_len] -- the prompt tokens
 /// Returns the generated token IDs (excluding the prompt).
 pub fn generate(
     model: &mut Qwen3ForCausalLM,
@@ -84,30 +109,95 @@ pub fn generate(
     let (_, prompt_len) = input_ids.dims2()?;
     let device = model.device().clone();
 
+    println!("========================================");
+    println!("[Generate] PREFILL: prompt_len={}", prompt_len);
+    println!("========================================");
+
     // Prefill: forward the entire prompt at once
     let logits = model.forward(input_ids, 0)?;
-    // Take logits for the last position
     let last_logits = logits.i((0, prompt_len - 1))?;
-    let mut next_token = sample_token(&last_logits, params)?;
 
+    // Log logit stats for the last position
+    let logits_vec: Vec<f32> = last_logits.to_dtype(candle_core::DType::F32)?.to_vec1()?;
+    let l_min = logits_vec.iter().cloned().fold(f32::INFINITY, f32::min);
+    let l_max = logits_vec.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+    let l_mean: f32 = logits_vec.iter().sum::<f32>() / logits_vec.len() as f32;
+    println!(
+        "[Generate] Prefill logits (last pos): vocab_size={}, mean={:.4}, min={:.4}, max={:.4}",
+        logits_vec.len(),
+        l_mean,
+        l_min,
+        l_max
+    );
+
+    let mut next_token = sample_token(&last_logits, params)?;
     let mut generated = vec![next_token];
 
+    println!(
+        "[Generate] Prefill done. First generated token: {}",
+        next_token
+    );
+
     if next_token == params.eos_token_id {
+        println!("[Generate] EOS after prefill, stopping.");
         return Ok(generated);
     }
+
+    println!("========================================");
+    println!(
+        "[Generate] DECODE: max_tokens={}",
+        params.max_tokens
+    );
+    println!("========================================");
 
     // Decode one token at a time
     for step in 0..params.max_tokens - 1 {
         let offset = prompt_len + step;
-        let input = Tensor::new(&[next_token], &device)?.unsqueeze(0)?; // [1, 1]
+        println!(
+            "---- Decode step {}/{}, offset={}, input_token={} ----",
+            step + 1,
+            params.max_tokens - 1,
+            offset,
+            next_token
+        );
+
+        let input = Tensor::new(&[next_token], &device)?.unsqueeze(0)?;
         let logits = model.forward(&input, offset)?;
         let last_logits = logits.i((0, 0))?;
+
+        // Log logit stats
+        let logits_vec: Vec<f32> = last_logits.to_dtype(candle_core::DType::F32)?.to_vec1()?;
+        let l_min = logits_vec.iter().cloned().fold(f32::INFINITY, f32::min);
+        let l_max = logits_vec.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+        println!(
+            "[Generate] Step {} logits: min={:.4}, max={:.4}",
+            step + 1,
+            l_min,
+            l_max
+        );
+
         next_token = sample_token(&last_logits, params)?;
         generated.push(next_token);
+
+        println!(
+            "[Generate] Step {} => token_id={}, total_generated={}",
+            step + 1,
+            next_token,
+            generated.len()
+        );
+
         if next_token == params.eos_token_id {
+            println!("[Generate] EOS token hit at step {}, stopping.", step + 1);
             break;
         }
     }
+
+    println!("========================================");
+    println!(
+        "[Generate] DONE: generated {} tokens",
+        generated.len()
+    );
+    println!("========================================");
 
     Ok(generated)
 }
