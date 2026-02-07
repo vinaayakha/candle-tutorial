@@ -5,7 +5,6 @@ use serde::Deserialize;
 pub const FLOATING_DTYPE: DType = DType::F32;
 
 /// Helper: compute summary stats (mean, min, max) from a tensor for logging.
-/// Returns (mean, min, max). Falls back to (0,0,0) on error.
 fn tensor_stats(t: &Tensor) -> (f32, f32, f32) {
     let flat = t.flatten_all().and_then(|f| f.to_dtype(DType::F32));
     let Ok(flat) = flat else { return (0.0, 0.0, 0.0) };
@@ -180,21 +179,7 @@ impl Qwen3MLP {
 }
 
 // ---------------------------------------------------------------------------
-// Repeat KV heads for GQA
-// ---------------------------------------------------------------------------
-
-fn repeat_kv(xs: &Tensor, n_rep: usize) -> Result<Tensor> {
-    if n_rep == 1 {
-        return Ok(xs.clone());
-    }
-    let (b, num_kv_heads, seq_len, head_dim) = xs.dims4()?;
-    xs.unsqueeze(2)?
-        .expand((b, num_kv_heads, n_rep, seq_len, head_dim))?
-        .reshape((b, num_kv_heads * n_rep, seq_len, head_dim))
-}
-
-// ---------------------------------------------------------------------------
-// Attention (GQA with QK-norm, KV-cache)
+// Attention (GQA with QK-norm, fused SDPA, preallocated KV-cache)
 // ---------------------------------------------------------------------------
 
 struct Qwen3Attention {
@@ -207,7 +192,8 @@ struct Qwen3Attention {
     num_heads: usize,
     num_kv_heads: usize,
     head_dim: usize,
-    kv_cache: Option<(Tensor, Tensor)>,
+    scale: f32,
+    kv_cache: candle_nn::kv_cache::KvCache,
     layer_idx: usize,
 }
 
@@ -226,6 +212,11 @@ impl Qwen3Attention {
         let q_norm = RmsNorm::load(hd, config.rms_norm_eps, vb.pp("q_norm"))?;
         let k_norm = RmsNorm::load(hd, config.rms_norm_eps, vb.pp("k_norm"))?;
 
+        // dim=2 is the seq_len dimension in [b, heads, seq, head_dim]
+        let kv_cache = candle_nn::kv_cache::KvCache::new(2, config.max_position_embeddings);
+
+        let scale = 1.0 / (hd as f32).sqrt();
+
         Ok(Self {
             q_proj,
             k_proj,
@@ -236,7 +227,8 @@ impl Qwen3Attention {
             num_heads: nh,
             num_kv_heads: nkv,
             head_dim: hd,
-            kv_cache: None,
+            scale,
+            kv_cache,
             layer_idx,
         })
     }
@@ -244,7 +236,6 @@ impl Qwen3Attention {
     fn forward(
         &mut self,
         xs: &Tensor,
-        mask: Option<&Tensor>,
         rope: &Qwen3RotaryEmbedding,
         offset: usize,
     ) -> Result<Tensor> {
@@ -278,7 +269,7 @@ impl Qwen3Attention {
             v.dims()
         );
 
-        // QK-norm
+        // QK-norm (per-head RmsNorm)
         let q = self.apply_head_norm(&self.q_norm, &q)?;
         let k = self.apply_head_norm(&self.k_norm, &k)?;
 
@@ -291,16 +282,8 @@ impl Qwen3Attention {
         // RoPE
         let (q, k) = rope.apply(&q, &k, offset)?;
 
-        // KV-cache
-        let (k, v) = match &self.kv_cache {
-            None => (k, v),
-            Some((prev_k, prev_v)) => {
-                let k = Tensor::cat(&[prev_k, &k], 2)?;
-                let v = Tensor::cat(&[prev_v, &v], 2)?;
-                (k, v)
-            }
-        };
-        self.kv_cache = Some((k.clone(), v.clone()));
+        // Preallocated KV-cache: append new K/V and get full accumulated tensors
+        let (k, v) = self.kv_cache.append(&k.contiguous()?, &v.contiguous()?)?;
 
         let kv_seq_len = k.dim(2)?;
         println!(
@@ -308,49 +291,26 @@ impl Qwen3Attention {
             self.layer_idx, kv_seq_len
         );
 
-        // GQA expansion
-        let n_rep = self.num_heads / self.num_kv_heads;
-        let k = repeat_kv(&k, n_rep)?;
-        let v = repeat_kv(&v, n_rep)?;
+        // Fused SDPA — handles GQA natively (no repeat_kv needed),
+        // uses Metal GPU kernel with causal masking built-in.
+        // For prefill (seq>1): do_causal=true generates the mask internally.
+        // For decode (seq=1): no mask needed, uses optimized vector kernel.
+        let do_causal = seq_len > 1;
+        let attn_output = candle_nn::ops::sdpa(
+            &q.contiguous()?,
+            &k.contiguous()?,
+            &v.contiguous()?,
+            None,      // no explicit mask — do_causal handles it
+            do_causal,
+            self.scale,
+            1.0,       // softcapping=1.0 means disabled
+        )?;
 
-        // Scaled dot-product attention
-        let scale = 1.0 / (self.head_dim as f64).sqrt();
-        let attn_weights = (q.matmul(&k.t()?)? * scale)?;
-
-        let attn_weights = match mask {
-            Some(m) => attn_weights.broadcast_add(m)?,
-            None => attn_weights,
-        };
-
-        let attn_weights = candle_nn::ops::softmax_last_dim(&attn_weights)?;
-
-        // Log per-head attention stats (mean attention weight per head)
-        {
-            let (_, n_heads, q_len, kv_len) = attn_weights.dims4()?;
-            println!(
-                "    [Layer {:>2}] Attention weights: [{}, {}, {}, {}] (heads x q_len x kv_len)",
-                self.layer_idx, b, n_heads, q_len, kv_len
-            );
-            // Show stats for first few heads
-            let max_heads_to_show = n_heads.min(4);
-            for h in 0..max_heads_to_show {
-                let head_w = attn_weights.i((0, h))?; // [q_len, kv_len]
-                let (hm, hmin, hmax) = tensor_stats(&head_w);
-                println!(
-                    "    [Layer {:>2}]   Head {:>2}: mean={:.4}, min={:.4}, max={:.4}",
-                    self.layer_idx, h, hm, hmin, hmax
-                );
-            }
-            if n_heads > max_heads_to_show {
-                println!(
-                    "    [Layer {:>2}]   ... ({} more heads)",
-                    self.layer_idx,
-                    n_heads - max_heads_to_show
-                );
-            }
-        }
-
-        let attn_output = attn_weights.matmul(&v)?;
+        println!(
+            "    [Layer {:>2}] SDPA output: {:?}",
+            self.layer_idx,
+            attn_output.dims()
+        );
 
         // Reshape back to [b, seq, hidden]
         let attn_output = attn_output
@@ -380,7 +340,7 @@ impl Qwen3Attention {
     }
 
     fn reset_kv_cache(&mut self) {
-        self.kv_cache = None;
+        self.kv_cache.reset();
     }
 }
 
@@ -419,7 +379,6 @@ impl Qwen3DecoderLayer {
     fn forward(
         &mut self,
         xs: &Tensor,
-        mask: Option<&Tensor>,
         rope: &Qwen3RotaryEmbedding,
         offset: usize,
     ) -> Result<Tensor> {
@@ -442,7 +401,7 @@ impl Qwen3DecoderLayer {
             self.layer_idx, ln_mean, ln_min, ln_max
         );
 
-        let xs = self.self_attn.forward(&xs, mask, rope, offset)?;
+        let xs = self.self_attn.forward(&xs, rope, offset)?;
         let xs = (residual + xs)?;
 
         let (r1_mean, _, _) = tensor_stats(&xs);
@@ -528,21 +487,10 @@ impl Qwen3Model {
             emax
         );
 
-        // Causal mask — cast to match embedding dtype (BF16 on GPU)
-        let mask = if seq_len > 1 {
-            let m = Self::build_causal_mask(seq_len, offset, &self.device)?
-                .to_dtype(xs.dtype())?;
-            println!("[Model] Causal mask: {:?}, dtype: {:?}", m.dims(), m.dtype());
-            Some(m)
-        } else {
-            println!("[Model] No causal mask (single token decode)");
-            None
-        };
-
         let num_layers = self.layers.len();
         for (i, layer) in self.layers.iter_mut().enumerate() {
             println!("--- Layer {}/{} ---", i, num_layers - 1);
-            xs = layer.forward(&xs, mask.as_ref(), &self.rotary_emb, offset)?;
+            xs = layer.forward(&xs, &self.rotary_emb, offset)?;
         }
 
         let xs = self.norm.forward(&xs)?;
@@ -556,23 +504,6 @@ impl Qwen3Model {
         );
 
         Ok(xs)
-    }
-
-    fn build_causal_mask(seq_len: usize, offset: usize, device: &Device) -> Result<Tensor> {
-        let total_len = offset + seq_len;
-        let mask: Vec<f32> = (0..seq_len)
-            .flat_map(|i| {
-                (0..total_len).map(move |j| {
-                    if j > offset + i {
-                        f32::NEG_INFINITY
-                    } else {
-                        0.0
-                    }
-                })
-            })
-            .collect();
-        let mask = Tensor::from_vec(mask, (1, 1, seq_len, total_len), device)?;
-        Ok(mask)
     }
 
     pub fn reset_kv_cache(&mut self) {
