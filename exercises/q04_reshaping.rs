@@ -36,13 +36,13 @@ use candle_core::{DType, Device, Result, Tensor};
 pub fn reshape_1d_to_2d(t: &Tensor) -> Result<Tensor> {
     // TODO: Reshape from [12] to [3, 4]
     // HINT: t.reshape((3, 4))
-    todo!("Reshape 1D to 2D")
+    t.reshape((3, 4))
 }
 
 /// Q4b: Reshape a [2, 6] tensor into [2, 3, 2].
 pub fn reshape_2d_to_3d(t: &Tensor) -> Result<Tensor> {
     // TODO: Reshape from [2, 6] to [2, 3, 2]
-    todo!("Reshape 2D to 3D")
+    t.reshape((2,3,2))
 }
 
 /// Q4c: Add a batch dimension. Input: [seq_len]. Output: [1, seq_len].
@@ -50,7 +50,7 @@ pub fn reshape_2d_to_3d(t: &Tensor) -> Result<Tensor> {
 pub fn add_batch_dim(t: &Tensor) -> Result<Tensor> {
     // TODO: Add a dimension at position 0
     // HINT: t.unsqueeze(0)?
-    todo!("Add batch dimension")
+   t.unsqueeze(0)
 }
 
 /// Q4d: Remove the batch dimension. Input: [1, seq_len, hidden]. Output: [seq_len, hidden].
@@ -58,7 +58,7 @@ pub fn add_batch_dim(t: &Tensor) -> Result<Tensor> {
 pub fn remove_batch_dim(t: &Tensor) -> Result<Tensor> {
     // TODO: Remove dimension at position 0
     // HINT: t.squeeze(0)?
-    todo!("Remove batch dimension")
+    t.squeeze(0)
 }
 
 /// Q4e: THIS IS THE CRITICAL ATTENTION RESHAPE PATTERN.
@@ -81,7 +81,7 @@ pub fn attention_reshape(
     // INTERVIEW Q: Why transpose(1,2) and not transpose(2,3)?
     //   Answer: We want [b, heads, seq, dim] so heads become the "batch-like"
     //   dimension for parallel attention computation.
-    todo!("Attention reshape pattern")
+    t.reshape((batch, seq_len, num_heads, head_dim))?.transpose(1, 2)
 }
 
 /// Q4f: Reverse the attention reshape. Go from [b, nh, s, hd] back to [b, s, nh*hd].
@@ -93,18 +93,20 @@ pub fn reverse_attention_reshape(t: &Tensor) -> Result<Tensor> {
     // INTERVIEW Q: Why is .contiguous()? needed here?
     //   Answer: transpose() creates a non-contiguous view. reshape() requires
     //   contiguous data. Without it, you get a runtime error.
-    todo!("Reverse attention reshape")
+    t.transpose(1, 2)?.contiguous()?.reshape((t.dims()[0], t.dims()[2], t.dims()[1] * t.dims()[3]))
 }
 
 /// Q4g: Flatten a tensor completely to 1D.
 pub fn flatten_all(t: &Tensor) -> Result<Tensor> {
     // TODO: Flatten to 1D
     // HINT: t.flatten_all()?
-    todo!("Flatten all")
+    t.flatten_all()
 }
 
 #[cfg(test)]
 mod tests {
+    use candle_core::IndexOp;
+
     use super::*;
 
     #[test]
@@ -144,6 +146,7 @@ mod tests {
         // batch=1, seq=4, 8 heads, head_dim=64, so hidden=512
         let t = Tensor::zeros((1, 4, 512), DType::F32, &Device::Cpu)?;
         let r = attention_reshape(&t, 1, 4, 8, 64)?;
+        println!("Attention reshape output dims: {:?}", r.dims());
         assert_eq!(r.dims(), &[1, 8, 4, 64]);
         Ok(())
     }

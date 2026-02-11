@@ -40,6 +40,10 @@ name = "q04_reshaping"
 path = "exercises/q04_reshaping.rs"
 
 [[example]]
+name = "q04b_attention_viz"
+path = "exercises/q04b_attention_viz.rs"
+
+[[example]]
 name = "q05_indexing_slicing"
 path = "exercises/q05_indexing_slicing.rs"
 
