@@ -21,3 +21,64 @@ default = []
 cuda = ["candle-core/cuda", "candle-nn/cuda"]
 metal = ["candle-core/metal", "candle-nn/metal"]
 accelerate = ["candle-core/accelerate", "candle-nn/accelerate"]
+
+# ── Interview Prep Exercises ──────────────────────────────────────────────────
+[[example]]
+name = "q01_tensor_creation"
+path = "exercises/q01_tensor_creation.rs"
+
+[[example]]
+name = "q02_dtype_and_device"
+path = "exercises/q02_dtype_and_device.rs"
+
+[[example]]
+name = "q03_tensor_arithmetic"
+path = "exercises/q03_tensor_arithmetic.rs"
+
+[[example]]
+name = "q04_reshaping"
+path = "exercises/q04_reshaping.rs"
+
+[[example]]
+name = "q05_indexing_slicing"
+path = "exercises/q05_indexing_slicing.rs"
+
+[[example]]
+name = "q06_broadcasting"
+path = "exercises/q06_broadcasting.rs"
+
+[[example]]
+name = "q07_linear_layer"
+path = "exercises/q07_linear_layer.rs"
+
+[[example]]
+name = "q08_layer_norm"
+path = "exercises/q08_layer_norm.rs"
+
+[[example]]
+name = "q09_rms_norm"
+path = "exercises/q09_rms_norm.rs"
+
+[[example]]
+name = "q10_rotary_embeddings"
+path = "exercises/q10_rotary_embeddings.rs"
+
+[[example]]
+name = "q11_self_attention"
+path = "exercises/q11_self_attention.rs"
+
+[[example]]
+name = "q12_kv_cache"
+path = "exercises/q12_kv_cache.rs"
+
+[[example]]
+name = "q13_mlp_block"
+path = "exercises/q13_mlp_block.rs"
+
+[[example]]
+name = "q14_varbuilder_loading"
+path = "exercises/q14_varbuilder_loading.rs"
+
+[[example]]
+name = "q15_sampling"
+path = "exercises/q15_sampling.rs"
