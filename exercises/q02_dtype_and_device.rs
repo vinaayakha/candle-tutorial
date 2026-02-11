@@ -34,7 +34,7 @@ use candle_core::{DType, Device, Result, Tensor};
 pub fn roundtrip_bf16(t: &Tensor) -> Result<Tensor> {
     // TODO: Convert to BF16 then back to F32
     // HINT: chain two .to_dtype() calls
-    todo!("Round-trip through BF16")
+    t.to_dtype(DType::BF16)?.to_dtype(DType::F32)
 }
 
 /// Q2b: Given a dtype, return the "internal compute dtype" that should be
@@ -43,7 +43,10 @@ pub fn roundtrip_bf16(t: &Tensor) -> Result<Tensor> {
 pub fn get_internal_dtype(dtype: DType) -> DType {
     // TODO: Implement the upcast logic
     // HINT: match on the dtype, return F32 for F16/BF16, pass through otherwise
-    todo!("Get internal compute dtype")
+    match dtype {
+        DType::F16 | DType::BF16 => DType::F32,
+        _ => dtype, 
+    }
 }
 
 /// Q2c: Create a tensor on CPU and verify it's on CPU.
@@ -53,7 +56,9 @@ pub fn verify_device() -> Result<(Tensor, bool)> {
     // Return (tensor, true if device is CPU)
     // HINT: Check tensor.device() - comparing with Device::Cpu
     // HINT: matches!(tensor.device(), Device::Cpu)
-    todo!("Verify device placement")
+    let tensor = Tensor::zeros((2, 2), DType::F32, &Device::Cpu)?;
+    let is_cpu = matches!(tensor.device(), Device::Cpu);
+    Ok((tensor, is_cpu))
 }
 
 /// Q2d: Given two tensors, check if they are on the same device AND same dtype.
@@ -62,7 +67,9 @@ pub fn check_compatible(a: &Tensor, b: &Tensor) -> (bool, bool) {
     // TODO: Return (same_device, same_dtype)
     // HINT: Use .device() and .dtype() comparisons
     // NOTE: Device implements PartialEq, DType implements PartialEq
-    todo!("Check tensor compatibility")
+    let same_device = a.device().location() == b.device().location();
+    let same_dtype = a.dtype() == b.dtype();
+    (same_device, same_dtype)
 }
 
 /// Q2e: INTERVIEW QUESTION - What does device.bf16_default_to_f32() do?
@@ -73,7 +80,11 @@ pub fn select_dtype_for_device(device: &Device) -> DType {
     // TODO: Implement the device-dependent dtype selection
     // HINT: match on Device variants
     // HINT: Device::Cpu => F32, Device::Cuda(_) | Device::Metal(_) => BF16
-    todo!("Select dtype for device")
+    if matches!(device, Device::Cuda(_) | Device::Metal(_)) {
+        DType::BF16
+    } else {
+        DType::F32
+    }
 }
 
 #[cfg(test)]
