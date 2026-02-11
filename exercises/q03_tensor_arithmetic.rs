@@ -33,28 +33,28 @@ use candle_core::{DType, Device, Result, Tensor};
 pub fn add_tensors(a: &Tensor, b: &Tensor) -> Result<Tensor> {
     // TODO: Return a + b
     // HINT: (a + b)? works because Tensor implements Add
-    todo!("Add two tensors")
+    a + b 
 }
 
 /// Q3b: Multiply two tensors element-wise.
 pub fn multiply_tensors(a: &Tensor, b: &Tensor) -> Result<Tensor> {
     // TODO: Return a * b element-wise
     // HINT: (a * b)? -- remember the parentheses!
-    todo!("Multiply two tensors")
+    a * b
 }
 
 /// Q3c: Matrix multiplication. a is [2, 3], b is [3, 4]. Return [2, 4].
 pub fn matmul(a: &Tensor, b: &Tensor) -> Result<Tensor> {
     // TODO: Return the matrix product a @ b
     // HINT: a.matmul(b)?
-    todo!("Matrix multiply")
+    a.matmul(b)
 }
 
 /// Q3d: Compute the sum of ALL elements in a tensor, returning a scalar f32.
 pub fn sum_all(t: &Tensor) -> Result<f32> {
     // TODO: Sum all elements and return as f32
     // HINT: t.sum_all()?.to_scalar::<f32>()?
-    todo!("Sum all elements")
+    t.sum_all()?.to_scalar::<f32>()
 }
 
 /// Q3e: Compute mean along dimension 1, keeping the dimension.
@@ -63,7 +63,7 @@ pub fn mean_along_dim1(t: &Tensor) -> Result<Tensor> {
     // TODO: Compute mean along dim 1 with keepdim
     // HINT: t.mean_keepdim(1)?
     // INTERVIEW Q: Why is keepdim important for broadcasting later?
-    todo!("Mean along dim 1")
+    t.mean_keepdim(1)
 }
 
 /// Q3f: Implement the sigmoid function: 1 / (1 + exp(-x))
@@ -74,7 +74,7 @@ pub fn manual_sigmoid(x: &Tensor) -> Result<Tensor> {
     // INTERVIEW Q: Why does Candle not have a built-in sigmoid on Tensor?
     //   (Answer: it does via candle_nn::ops::sigmoid, but it's good to
     //    understand the composition)
-    todo!("Manual sigmoid")
+    (x.neg()?.exp()? + 1.0)?.recip()
 }
 
 /// Q3g: Apply the affine transformation: y = x * 2.0 + 3.0
@@ -84,7 +84,7 @@ pub fn affine_transform(x: &Tensor) -> Result<Tensor> {
     // HINT: x.affine(2.0, 3.0)
     // INTERVIEW Q: When is .affine() better than separate mul+add?
     //   (Answer: fused ops reduce memory traffic and are faster)
-    todo!("Affine transform")
+    x.affine(2.0,3.0 )
 }
 
 #[cfg(test)]
