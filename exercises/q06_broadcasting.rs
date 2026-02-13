@@ -34,7 +34,7 @@ use candle_core::{DType, Device, Result, Tensor};
 pub fn add_bias_2d(x: &Tensor, bias: &Tensor) -> Result<Tensor> {
     // TODO: Broadcast-add bias to x
     // HINT: x.broadcast_add(bias)?
-    todo!("Add bias to 2D tensor")
+    x.broadcast_add(bias)
 }
 
 /// Q6b: Add a bias vector [hidden] to a 3D tensor [batch, seq, hidden].
@@ -42,7 +42,7 @@ pub fn add_bias_2d(x: &Tensor, bias: &Tensor) -> Result<Tensor> {
 pub fn add_bias_3d(x: &Tensor, bias: &Tensor) -> Result<Tensor> {
     // TODO: Broadcast-add bias to x
     // HINT: Same method — broadcasting auto-handles extra dims
-    todo!("Add bias to 3D tensor")
+    x.broadcast_add(bias)
 }
 
 /// Q6c: Subtract the mean from a tensor along the last dimension.
@@ -54,7 +54,8 @@ pub fn subtract_mean(x: &Tensor) -> Result<Tensor> {
     //       x.broadcast_sub(&mean)?
     // INTERVIEW Q: Why use D::Minus1 instead of 2?
     //   Answer: D::Minus1 works regardless of tensor rank, making code generic.
-    todo!("Subtract mean")
+    let mean = x.mean_keepdim(candle_core::D::Minus1)?;
+    x.broadcast_sub(&mean)
 }
 
 /// Q6d: Multiply weight [hidden] with normalized tensor [batch, seq, hidden].
@@ -62,7 +63,7 @@ pub fn subtract_mean(x: &Tensor) -> Result<Tensor> {
 pub fn apply_weight_and_bias(x: &Tensor, weight: &Tensor, bias: &Tensor) -> Result<Tensor> {
     // TODO: broadcast_mul with weight, then broadcast_add with bias
     // HINT: x.broadcast_mul(weight)?.broadcast_add(bias)?
-    todo!("Apply weight and bias")
+    x.broadcast_mul(weight)?.broadcast_add(bias)
 }
 
 /// Q6e: Scale attention scores by dividing by sqrt(head_dim).
@@ -74,7 +75,7 @@ pub fn scale_attention(scores: &Tensor, head_dim: usize) -> Result<Tensor> {
     // TODO: Divide scores by sqrt(head_dim)
     // HINT: You can use (scores / (head_dim as f64).sqrt())?
     // OR: scores.affine(1.0 / (head_dim as f64).sqrt(), 0.0)?
-    todo!("Scale attention scores")
+    scores.affine(1.0 / (head_dim as f64).sqrt(), 0.0)
 }
 
 /// Q6f: Broadcast a linear weight [out, in] to [batch, out, in].
@@ -85,12 +86,13 @@ pub fn broadcast_weight(weight: &Tensor, batch_size: usize) -> Result<Tensor> {
     // INTERVIEW Q: Why does the custom Linear use broadcast_left + transpose?
     //   Answer: For batched matmul, we need weight to be [b, in, out]
     //   so: broadcast_left(b) gives [b, out, in], then .t()? gives [b, in, out]
-    todo!("Broadcast weight for batch")
+    weight.broadcast_left(batch_size)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use candle_core::IndexOp;
 
     #[test]
     fn test_add_bias_2d() -> Result<()> {

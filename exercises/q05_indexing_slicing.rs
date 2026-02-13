@@ -34,7 +34,7 @@ use candle_core::{DType, Device, IndexOp, Result, Tensor};
 pub fn get_element(t: &Tensor) -> Result<f32> {
     // TODO: Get element at row 0, col 2
     // HINT: t.i((0, 2))?.to_scalar::<f32>()?
-    todo!("Get single element")
+   t.i((0,2))?.to_scalar::<f32>()
 }
 
 /// Q5b: Extract the last token's logits.
@@ -48,7 +48,8 @@ pub fn get_last_token_logits(logits: &Tensor) -> Result<Tensor> {
     // INTERVIEW Q: Why do we take the LAST position's logits?
     //   Answer: In causal LM, each position predicts the NEXT token.
     //   The last position predicts the first generated token.
-    todo!("Get last token logits")
+    let seq_len = logits.dim(1)?;
+    logits.i((0, seq_len -1))
 }
 
 /// Q5c: Slice a tensor along dimension 0 using narrow.
@@ -56,7 +57,7 @@ pub fn get_last_token_logits(logits: &Tensor) -> Result<Tensor> {
 pub fn narrow_slice(t: &Tensor) -> Result<Tensor> {
     // TODO: Use .narrow(dim, start, length)
     // HINT: t.narrow(0, 3, 4)?  — 4 rows starting at position 3
-    todo!("Narrow slice")
+    t.narrow(0,3,4)
 }
 
 /// Q5d: Extract RoPE cos/sin for the current offset.
@@ -69,7 +70,7 @@ pub fn slice_rope_table(cos: &Tensor, offset: usize, seq_len: usize) -> Result<T
     // INTERVIEW Q: Why do we need offset for RoPE during decode?
     //   Answer: During decode, we generate one token at a time but need
     //   position-specific embeddings. offset tracks the absolute position.
-    todo!("Slice RoPE table")
+    cos.i(offset..offset + seq_len)
 }
 
 /// Q5e: Implement index_select to gather specific rows.
@@ -81,7 +82,7 @@ pub fn embedding_lookup(weight: &Tensor, indices: &Tensor) -> Result<Tensor> {
     // HINT: weight.index_select(indices, 0)?
     // INTERVIEW Q: What does Embedding::forward() do under the hood?
     //   Answer: It's literally index_select on the embedding weight matrix.
-    todo!("Embedding lookup")
+    weight.index_select(indices, 0)
 }
 
 #[cfg(test)]
