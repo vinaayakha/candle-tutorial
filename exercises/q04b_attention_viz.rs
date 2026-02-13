@@ -77,12 +77,12 @@ pub fn visualize_attention_shapes(
     //   let q = q_proj.forward(&hidden)?;
     //   let k = k_proj.forward(&hidden)?;
     //   let v = v_proj.forward(&hidden)?;
-    let q_proj = todo!("Create Q projection");
-    let k_proj = todo!("Create K projection");
-    let v_proj = todo!("Create V projection");
-    let q: Tensor = todo!("Forward Q");
-    let k: Tensor = todo!("Forward K");
-    let v: Tensor = todo!("Forward V");
+    let q_proj = candle_nn::linear_no_bias(hidden_size, num_heads * head_dim, vb.pp("q_proj"))?;
+    let k_proj  = candle_nn::linear_no_bias(hidden_size, num_kv_heads * head_dim, vb.pp("k_proj"))?;
+    let v_proj = candle_nn::linear_no_bias(hidden_size, num_kv_heads * head_dim, vb.pp("v_proj"))?;
+    let q: Tensor = q_proj.forward(&hidden)?;
+    let k: Tensor = k_proj.forward(&hidden)?;
+    let v: Tensor = v_proj.forward(&hidden)?;
 
     println!("\n② After Q/K/V projection:");
     println!("   Q projected:               {:?}", q.dims());
@@ -98,9 +98,9 @@ pub fn visualize_attention_shapes(
     //   let q = q.reshape((batch, seq_len, num_heads, head_dim))?;
     //   let k = k.reshape((batch, seq_len, num_kv_heads, head_dim))?;
     //   let v = v.reshape((batch, seq_len, num_kv_heads, head_dim))?;
-    let q: Tensor = todo!("Reshape Q to multi-head");
-    let k: Tensor = todo!("Reshape K to multi-head");
-    let v: Tensor = todo!("Reshape V to multi-head");
+    let q = q.reshape((batch, seq_len, num_heads, head_dim))?;
+    let k = k.reshape((batch, seq_len, num_kv_heads, head_dim))?;
+    let v = v.reshape((batch, seq_len, num_kv_heads, head_dim))?;
 
     println!("\n③ After reshape to multi-head:");
     println!("   Q reshaped:                {:?}", q.dims());
@@ -114,9 +114,9 @@ pub fn visualize_attention_shapes(
     //   let q = q.transpose(1, 2)?;
     //   let k = k.transpose(1, 2)?;
     //   let v = v.transpose(1, 2)?;
-    let q: Tensor = todo!("Transpose Q");
-    let k: Tensor = todo!("Transpose K");
-    let v: Tensor = todo!("Transpose V");
+    let q = q.transpose(1, 2)?;
+    let k = k.transpose(1, 2)?;
+    let v = v.transpose(1, 2)?;
 
     println!("\n④ After transpose(1,2) — ATTENTION-READY FORMAT:");
     println!("   Q [b, nh, s, hd]:          {:?}  ← {} query heads", q.dims(), num_heads);
@@ -142,16 +142,21 @@ pub fn visualize_attention_shapes(
     println!("   weights = softmax(scores):  [{}, {}, {}, {}]",
         batch, num_heads, seq_len, seq_len);
 
-    // Use sdpa for the actual computation
-    let attn_output = candle_nn::ops::sdpa(
-        &q.contiguous()?,
-        &k.contiguous()?,
-        &v.contiguous()?,
-        None,
-        seq_len > 1, // causal for prefill
-        scale,
-        1.0,
-    )?;
+    // Manual attention: Q @ K^T, scale, softmax, @ V
+    // For GQA, repeat KV heads to match Q heads before matmul
+    let q_cont = q.contiguous()?;
+    let k_cont = k.contiguous()?;
+    let v_cont = v.contiguous()?;
+    let (k_att, v_att) = if num_heads != num_kv_heads {
+        let repeat = num_heads / num_kv_heads;
+        (k_cont.repeat((1, repeat, 1, 1))?, v_cont.repeat((1, repeat, 1, 1))?)
+    } else {
+        (k_cont, v_cont)
+    };
+    let scores = q_cont.matmul(&k_att.transpose(2, 3)?)?;
+    let scores = (scores * scale as f64)?;
+    let weights = candle_nn::ops::softmax_last_dim(&scores)?;
+    let attn_output = weights.matmul(&v_att)?;
 
     println!("   output = weights @ V:      {:?}", attn_output.dims());
 
@@ -162,7 +167,8 @@ pub fn visualize_attention_shapes(
     // HINT:
     //   let (b, nh, s, hd) = attn_output.dims4()?;
     //   let output = attn_output.transpose(1, 2)?.contiguous()?.reshape((b, s, nh * hd))?;
-    let output: Tensor = todo!("Reverse attention reshape");
+    let (b, nh, s, hd) = attn_output.dims4()?;
+    let output: Tensor = attn_output.transpose(1, 2)?.contiguous()?.reshape((b, s, nh * hd))?;
 
     println!("\n⑥ Reshape back to hidden:");
     println!("   transpose(1,2):            [{}, {}, {}, {}]", batch, seq_len, num_heads, head_dim);
@@ -174,7 +180,8 @@ pub fn visualize_attention_shapes(
     // HINT:
     //   let o_proj = candle_nn::linear_no_bias(num_heads * head_dim, hidden_size, vb.pp("o_proj"))?;
     //   let final_output = o_proj.forward(&output)?;
-    let final_output: Tensor = todo!("Output projection");
+    let o_proj = candle_nn::linear_no_bias(num_heads * head_dim, hidden_size, vb.pp("o_proj"))?;
+    let final_output: Tensor =  o_proj.forward(&output)?;
 
     println!("   O projection:              {:?}  ← back to hidden_size!", final_output.dims());
 
