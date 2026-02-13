@@ -39,7 +39,7 @@ pub fn manual_linear(x: &Tensor, weight: &Tensor, bias: &Tensor) -> Result<Tenso
     // Step 2: Matrix multiply x @ W^T
     // Step 3: Add bias via broadcast
     // HINT: x.matmul(&weight.t()?)?.broadcast_add(bias)?
-    todo!("Manual linear forward")
+   x.matmul(&weight.t()?)?.broadcast_add(bias)
 }
 
 /// Q7b: Implement manual linear for 3D input (batched).
@@ -76,7 +76,10 @@ pub fn linear_with_varbuilder() -> Result<Tensor> {
     //   let layer = candle_nn::linear(3, 5, vb)?;
     //   let input = Tensor::zeros((2, 3), DType::F32, &Device::Cpu)?;
     //   layer.forward(&input)?
-    todo!("Linear with VarBuilder")
+    let vb = VarBuilder::zeros(DType::F32, &Device::Cpu);
+    let layer = candle_nn::linear(3,5, vb)?;
+    let input = Tensor::zeros((2,3), DType::F32, &Device::Cpu)?;
+    layer.forward(&input)
 }
 
 /// Q7d: Create a no-bias linear layer (used in LLaMA/Qwen attention projections).
@@ -88,7 +91,10 @@ pub fn linear_no_bias_example() -> Result<Tensor> {
     //   let layer = candle_nn::linear_no_bias(4, 8, vb)?;
     //   let input = Tensor::zeros((1, 3, 4), DType::F32, &Device::Cpu)?;
     //   layer.forward(&input)?
-    todo!("Linear no-bias")
+    let vb = VarBuilder::zeros(DType::F32, &Device::Cpu);
+    let layer = candle_nn::linear_no_bias(4,8, vb)?;
+    let input = Tensor::zeros((1, 3, 4), DType::F32, &Device::Cpu)?;
+    layer.forward(&input)
 }
 
 /// Q7e: INTERVIEW QUESTION
@@ -106,7 +112,7 @@ pub fn create_tied_lm_head(embed_weight: &Tensor) -> Result<candle_nn::Linear> {
     //   Answer: The embedding maps token_id -> vector. The lm_head maps
     //   vector -> logits over vocab. They are conceptual inverses, so
     //   sharing weights acts as a regularizer and saves parameters.
-    todo!("Create tied lm_head")
+    Ok(candle_nn::Linear::new(embed_weight.clone(),None))
 }
 
 #[cfg(test)]
